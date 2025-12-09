@@ -3,6 +3,10 @@ package core
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // TransactionManager handles database transactions
@@ -23,6 +27,7 @@ type TxOptions struct {
 	Isolation  IsolationLevel // Transaction isolation level
 	ReadOnly   bool           // Read-only transaction
 	Deferrable bool           // Deferrable constraint checking
+	Timeout    time.Duration  // Transaction timeout
 }
 
 // IsolationLevel represents transaction isolation level
@@ -53,19 +58,80 @@ func (l IsolationLevel) ToSQLIsolation() sql.IsolationLevel {
 
 // Tx represents a database transaction
 type Tx struct {
-	ctx context.Context
-	tx  interface{} // Underlying transaction (pgx or sql.Tx)
+	ctx      context.Context
+	tx       pgx.Tx
+	savepoints map[string]bool // Track savepoints
 }
 
 // Commit commits the transaction
 func (t *Tx) Commit() error {
-	// Implementation will depend on the underlying driver
-	return nil
+	if t.tx == nil {
+		return fmt.Errorf("transaction is nil")
+	}
+	return t.tx.Commit(t.ctx)
 }
 
 // Rollback rolls back the transaction
 func (t *Tx) Rollback() error {
-	// Implementation will depend on the underlying driver
+	if t.tx == nil {
+		return fmt.Errorf("transaction is nil")
+	}
+	return t.tx.Rollback(t.ctx)
+}
+
+// SavePoint creates a savepoint with the given name
+func (t *Tx) SavePoint(name string) error {
+	if t.tx == nil {
+		return fmt.Errorf("transaction is nil")
+	}
+	if t.savepoints == nil {
+		t.savepoints = make(map[string]bool)
+	}
+	
+	query := fmt.Sprintf("SAVEPOINT %s", name)
+	_, err := t.tx.Exec(t.ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to create savepoint %s: %w", name, err)
+	}
+	
+	t.savepoints[name] = true
+	return nil
+}
+
+// RollbackTo rolls back to a specific savepoint
+func (t *Tx) RollbackTo(name string) error {
+	if t.tx == nil {
+		return fmt.Errorf("transaction is nil")
+	}
+	if t.savepoints == nil || !t.savepoints[name] {
+		return fmt.Errorf("savepoint %s does not exist", name)
+	}
+	
+	query := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", name)
+	_, err := t.tx.Exec(t.ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to rollback to savepoint %s: %w", name, err)
+	}
+	
+	return nil
+}
+
+// ReleaseSavePoint releases a savepoint
+func (t *Tx) ReleaseSavePoint(name string) error {
+	if t.tx == nil {
+		return fmt.Errorf("transaction is nil")
+	}
+	if t.savepoints == nil || !t.savepoints[name] {
+		return fmt.Errorf("savepoint %s does not exist", name)
+	}
+	
+	query := fmt.Sprintf("RELEASE SAVEPOINT %s", name)
+	_, err := t.tx.Exec(t.ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to release savepoint %s: %w", name, err)
+	}
+	
+	delete(t.savepoints, name)
 	return nil
 }
 

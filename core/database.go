@@ -123,6 +123,13 @@ func (db *Database) Transaction(ctx context.Context, fn func(tx *Tx) error) erro
 
 // TransactionWithOptions executes a function within a transaction with options
 func (db *Database) TransactionWithOptions(ctx context.Context, opts TxOptions, fn func(tx *Tx) error) error {
+	// Apply timeout if specified
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+
 	// Begin transaction
 	pgxTx, err := db.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.TxIsoLevel(opts.Isolation.ToSQLIsolation().String()),
@@ -144,8 +151,9 @@ func (db *Database) TransactionWithOptions(ctx context.Context, opts TxOptions, 
 	}
 
 	tx := &Tx{
-		ctx: ctx,
-		tx:  pgxTx,
+		ctx:        ctx,
+		tx:         pgxTx,
+		savepoints: make(map[string]bool),
 	}
 
 	// Execute function
@@ -191,8 +199,9 @@ func (db *Database) BeginWithOptions(ctx context.Context, opts TxOptions) (*Tx, 
 	}
 
 	return &Tx{
-		ctx: ctx,
-		tx:  pgxTx,
+		ctx:        ctx,
+		tx:         pgxTx,
+		savepoints: make(map[string]bool),
 	}, nil
 }
 

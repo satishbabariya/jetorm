@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -62,7 +63,7 @@ func (r *BaseRepository[T, ID]) saveWithPool(ctx context.Context, entity *T) (*T
 }
 
 func (r *BaseRepository[T, ID]) saveWithTx(ctx context.Context, entity *T) (*T, error) {
-	tx := r.tx.tx.(pgx.Tx)
+	tx := r.tx.tx
 	
 	// Get primary key value
 	pkValue := r.getPKValue(entity)
@@ -180,6 +181,33 @@ func (r *BaseRepository[T, ID]) SaveAll(ctx context.Context, entities []*T) ([]*
 	return results, nil
 }
 
+// Update updates an existing entity (must have non-zero primary key)
+func (r *BaseRepository[T, ID]) Update(ctx context.Context, entity *T) (*T, error) {
+	pkValue := r.getPKValue(entity)
+	if r.isZeroValue(pkValue) {
+		return nil, ErrInvalidID
+	}
+
+	if r.tx != nil {
+		tx := r.tx.tx
+		return r.updateTx(ctx, entity, tx)
+	}
+	return r.update(ctx, entity, r.db.pool)
+}
+
+// UpdateAll updates multiple entities
+func (r *BaseRepository[T, ID]) UpdateAll(ctx context.Context, entities []*T) ([]*T, error) {
+	results := make([]*T, 0, len(entities))
+	for _, entity := range entities {
+		updated, err := r.Update(ctx, entity)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, updated)
+	}
+	return results, nil
+}
+
 // FindByID finds an entity by ID
 func (r *BaseRepository[T, ID]) FindByID(ctx context.Context, id ID) (*T, error) {
 	query := fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", r.tableName, r.pkField)
@@ -187,7 +215,7 @@ func (r *BaseRepository[T, ID]) FindByID(ctx context.Context, id ID) (*T, error)
 	
 	var row pgx.Row
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		row = tx.QueryRow(ctx, query, id)
 	} else {
 		row = r.db.pool.QueryRow(ctx, query, id)
@@ -212,7 +240,7 @@ func (r *BaseRepository[T, ID]) FindAll(ctx context.Context) ([]*T, error) {
 	var rows pgx.Rows
 	var err error
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		rows, err = tx.Query(ctx, query)
 	} else {
 		rows, err = r.db.pool.Query(ctx, query)
@@ -250,7 +278,7 @@ func (r *BaseRepository[T, ID]) FindAllByIDs(ctx context.Context, ids []ID) ([]*
 	var rows pgx.Rows
 	var err error
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		rows, err = tx.Query(ctx, query, args...)
 	} else {
 		rows, err = r.db.pool.Query(ctx, query, args...)
@@ -277,7 +305,7 @@ func (r *BaseRepository[T, ID]) DeleteByID(ctx context.Context, id ID) error {
 	
 	var err error
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		_, err = tx.Exec(ctx, query, id)
 	} else {
 		_, err = r.db.pool.Exec(ctx, query, id)
@@ -296,6 +324,38 @@ func (r *BaseRepository[T, ID]) DeleteAll(ctx context.Context, entities []*T) er
 	return nil
 }
 
+// DeleteAllByIDs deletes multiple entities by their IDs
+func (r *BaseRepository[T, ID]) DeleteAllByIDs(ctx context.Context, ids []ID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(
+		"DELETE FROM %s WHERE %s IN (%s)",
+		r.tableName,
+		r.pkField,
+		strings.Join(placeholders, ", "),
+	)
+	r.logQuery(query, args)
+
+	var err error
+	if r.tx != nil {
+		tx := r.tx.tx
+		_, err = tx.Exec(ctx, query, args...)
+	} else {
+		_, err = r.db.pool.Exec(ctx, query, args...)
+	}
+
+	return err
+}
+
 // Count counts all entities
 func (r *BaseRepository[T, ID]) Count(ctx context.Context) (int64, error) {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.tableName)
@@ -304,7 +364,7 @@ func (r *BaseRepository[T, ID]) Count(ctx context.Context) (int64, error) {
 	var count int64
 	var err error
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		err = tx.QueryRow(ctx, query).Scan(&count)
 	} else {
 		err = r.db.pool.QueryRow(ctx, query).Scan(&count)
@@ -325,7 +385,7 @@ func (r *BaseRepository[T, ID]) ExistsById(ctx context.Context, id ID) (bool, er
 	var exists bool
 	var err error
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		err = tx.QueryRow(ctx, query, id).Scan(&exists)
 	} else {
 		err = r.db.pool.QueryRow(ctx, query, id).Scan(&exists)
@@ -367,7 +427,7 @@ func (r *BaseRepository[T, ID]) FindAllPaged(ctx context.Context, pageable Pagea
 	var rows pgx.Rows
 	var err error
 	if r.tx != nil {
-		tx := r.tx.tx.(pgx.Tx)
+		tx := r.tx.tx
 		rows, err = tx.Query(ctx, query)
 	} else {
 		rows, err = r.db.pool.Query(ctx, query)
@@ -395,15 +455,43 @@ func (r *BaseRepository[T, ID]) FindAllPaged(ctx context.Context, pageable Pagea
 		totalPages = int((totalElements + int64(pageable.Size) - 1) / int64(pageable.Size))
 	}
 	
+	numberOfElements := len(content)
+	
 	return &Page[T]{
-		Content:       content,
-		Number:        pageable.Page,
-		Size:          pageable.Size,
-		TotalElements: totalElements,
-		TotalPages:    totalPages,
-		First:         pageable.Page == 0,
-		Last:          pageable.Page >= totalPages-1,
+		Content:          content,
+		Pageable:         pageable,
+		TotalElements:    totalElements,
+		TotalPages:       totalPages,
+		Size:             pageable.Size,
+		Number:           pageable.Page,
+		NumberOfElements: numberOfElements,
+		First:            pageable.Page == 0,
+		Last:             pageable.Page >= totalPages-1 || totalPages == 0,
+		Empty:            numberOfElements == 0,
+		Sort:             pageable.Sort,
 	}, nil
+}
+
+// SaveBatch saves entities in batches
+func (r *BaseRepository[T, ID]) SaveBatch(ctx context.Context, entities []*T, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 100 // Default batch size
+	}
+
+	for i := 0; i < len(entities); i += batchSize {
+		end := i + batchSize
+		if end > len(entities) {
+			end = len(entities)
+		}
+
+		batch := entities[i:end]
+		_, err := r.SaveAll(ctx, batch)
+		if err != nil {
+			return fmt.Errorf("batch save failed at offset %d: %w", i, err)
+		}
+	}
+
+	return nil
 }
 
 // WithTx returns a repository bound to a transaction
@@ -415,6 +503,70 @@ func (r *BaseRepository[T, ID]) WithTx(tx *Tx) Repository[T, ID] {
 		tableName: r.tableName,
 		pkField:   r.pkField,
 	}
+}
+
+// Query executes a raw SQL query and returns results
+func (r *BaseRepository[T, ID]) Query(ctx context.Context, query string, args ...interface{}) ([]*T, error) {
+	r.logQuery(query, args)
+
+	var rows pgx.Rows
+	var err error
+	if r.tx != nil {
+		tx := r.tx.tx
+		rows, err = tx.Query(ctx, query, args...)
+	} else {
+		rows, err = r.db.pool.Query(ctx, query, args...)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return r.scanRows(rows)
+}
+
+// QueryOne executes a raw SQL query and returns a single result
+func (r *BaseRepository[T, ID]) QueryOne(ctx context.Context, query string, args ...interface{}) (*T, error) {
+	r.logQuery(query, args)
+
+	var row pgx.Row
+	if r.tx != nil {
+		tx := r.tx.tx
+		row = tx.QueryRow(ctx, query, args...)
+	} else {
+		row = r.db.pool.QueryRow(ctx, query, args...)
+	}
+
+	result := new(T)
+	if err := r.scanRow(row, result); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// Exec executes a raw SQL statement and returns the number of rows affected
+func (r *BaseRepository[T, ID]) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+	r.logQuery(query, args)
+
+	var result pgconn.CommandTag
+	var err error
+	if r.tx != nil {
+		tx := r.tx.tx
+		result, err = tx.Exec(ctx, query, args...)
+	} else {
+		result, err = r.db.pool.Exec(ctx, query, args...)
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
+	return result.RowsAffected(), nil
 }
 
 // Helper methods
