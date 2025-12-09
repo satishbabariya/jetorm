@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -96,6 +98,71 @@ func MustConnect(config Config) *Database {
 		panic(err)
 	}
 	return db
+}
+
+// ConnectURL creates a database connection from a connection string
+func ConnectURL(connString string, opts ...ConfigOption) (*Database, error) {
+	// Parse connection string
+	parsedURL, err := url.Parse(connString)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid connection string: %v", ErrConnectionFailed, err)
+	}
+
+	// Extract components
+	config := DefaultConfig()
+	config.Host = parsedURL.Hostname()
+	if port := parsedURL.Port(); port != "" {
+		fmt.Sscanf(port, "%d", &config.Port)
+	}
+	config.Database = strings.TrimPrefix(parsedURL.Path, "/")
+	config.User = parsedURL.User.Username()
+	if password, ok := parsedURL.User.Password(); ok {
+		config.Password = password
+	}
+
+	// Parse query parameters
+	query := parsedURL.Query()
+	if sslMode := query.Get("sslmode"); sslMode != "" {
+		config.SSLMode = sslMode
+	}
+
+	// Apply additional options
+	for _, opt := range opts {
+		opt(&config)
+	}
+
+	return Connect(config)
+}
+
+// ConfigOption is a function that modifies Config
+type ConfigOption func(*Config)
+
+// WithMaxOpenConns sets the maximum open connections
+func WithMaxOpenConns(n int) ConfigOption {
+	return func(c *Config) {
+		c.MaxOpenConns = n
+	}
+}
+
+// WithMaxIdleConns sets the maximum idle connections
+func WithMaxIdleConns(n int) ConfigOption {
+	return func(c *Config) {
+		c.MaxIdleConns = n
+	}
+}
+
+// WithLogger sets a custom logger
+func WithLogger(logger Logger) ConfigOption {
+	return func(c *Config) {
+		c.Logger = logger
+	}
+}
+
+// WithLogSQL enables SQL logging
+func WithLogSQL(enabled bool) ConfigOption {
+	return func(c *Config) {
+		c.LogSQL = enabled
+	}
 }
 
 // Close closes the database connection
