@@ -22,6 +22,14 @@ type Repository[T any, ID comparable] interface {
 	// Pagination
 	FindAllPaged(ctx context.Context, pageable Pageable) (*Page[T], error)
 
+	// Specification
+	FindOne(ctx context.Context, spec Specification[T]) (*T, error)
+	FindAllWithSpec(ctx context.Context, spec Specification[T]) ([]*T, error)
+	FindAllPagedWithSpec(ctx context.Context, spec Specification[T], pageable Pageable) (*Page[T], error)
+	CountWithSpec(ctx context.Context, spec Specification[T]) (int64, error)
+	ExistsWithSpec(ctx context.Context, spec Specification[T]) (bool, error)
+	DeleteWithSpec(ctx context.Context, spec Specification[T]) (int64, error)
+
 	// Batch Operations
 	SaveBatch(ctx context.Context, entities []*T, batchSize int) error
 

@@ -16,20 +16,32 @@ type Entity struct {
 
 // Field represents metadata about an entity field
 type Field struct {
-	Name          string
-	DBName        string
-	Type          reflect.Type
-	PrimaryKey    bool
-	AutoIncrement bool
-	Unique        bool
-	NotNull       bool
-	Index         string
-	Size          int
-	Default       string
-	Check         string
-	ForeignKey    string
-	AutoNowAdd    bool
-	AutoNow       bool
+	Name            string
+	DBName          string
+	Type            reflect.Type
+	PrimaryKey      bool
+	AutoIncrement   bool
+	Unique          bool
+	NotNull         bool
+	Index           string
+	UniqueIndex     string
+	CompositeIndex  *CompositeIndex
+	Size            int
+	Default         string
+	Check           string
+	ForeignKey      string
+	OnDelete        string // cascade, set_null, set_default, restrict, no_action
+	OnUpdate        string // cascade, set_null, set_default, restrict, no_action
+	ExplicitType    string // type:text, type:decimal(10,2), etc.
+	AutoNowAdd      bool
+	AutoNow         bool
+	Ignored         bool // Field is ignored (db:"-")
+}
+
+// CompositeIndex represents a composite index definition
+type CompositeIndex struct {
+	Name  string
+	Order int
 }
 
 // EntityMetadata extracts metadata from an entity type
@@ -64,9 +76,21 @@ func EntityMetadata(entity interface{}) (*Entity, error) {
 
 // parseFieldTags parses struct tags for a field
 func parseFieldTags(field reflect.StructField) Field {
+	dbTag := field.Tag.Get("db")
+	
+	// Check if field is ignored
+	if dbTag == "-" {
+		return Field{
+			Name:    field.Name,
+			DBName:  "-",
+			Type:    field.Type,
+			Ignored: true,
+		}
+	}
+
 	f := Field{
 		Name:   field.Name,
-		DBName: field.Tag.Get("db"),
+		DBName: dbTag,
 		Type:   field.Type,
 	}
 
@@ -77,6 +101,11 @@ func parseFieldTags(field reflect.StructField) Field {
 
 	// Parse jet tags
 	jetTag := field.Tag.Get("jet")
+	if jetTag == "-" {
+		f.Ignored = true
+		return f
+	}
+
 	if jetTag != "" {
 		parseTags := parseTag(jetTag)
 		for _, tag := range parseTags {
@@ -94,6 +123,24 @@ func parseFieldTags(field reflect.StructField) Field {
 				if f.Index == "" {
 					f.Index = "idx_" + f.DBName
 				}
+			case "unique_index":
+				f.UniqueIndex = tag.Value
+				if f.UniqueIndex == "" {
+					f.UniqueIndex = "idx_unique_" + f.DBName
+				}
+			case "composite_index":
+				// Format: composite_index:name:order
+				// Example: composite_index:idx_sku_store:1
+				// The value is already in format "name:order" from parseTag
+				parts := strings.Split(tag.Value, ":")
+				if len(parts) >= 2 {
+					var order int
+					fmt.Sscanf(parts[1], "%d", &order)
+					f.CompositeIndex = &CompositeIndex{
+						Name:  parts[0],
+						Order: order,
+					}
+				}
 			case "size":
 				if tag.Value != "" {
 					// Parse size value
@@ -101,12 +148,24 @@ func parseFieldTags(field reflect.StructField) Field {
 					_, _ = fmt.Sscanf(tag.Value, "%d", &size)
 					f.Size = size
 				}
+			case "type":
+				// Explicit type specification
+				// Examples: type:text, type:decimal(10,2), type:jsonb
+				f.ExplicitType = tag.Value
 			case "default":
 				f.Default = tag.Value
 			case "check":
 				f.Check = tag.Value
 			case "foreign_key":
+				// Format: foreign_key:table.column
+				// Example: foreign_key:companies.id
 				f.ForeignKey = tag.Value
+			case "on_delete":
+				// Cascade actions: cascade, set_null, set_default, restrict, no_action
+				f.OnDelete = tag.Value
+			case "on_update":
+				// Cascade actions: cascade, set_null, set_default, restrict, no_action
+				f.OnUpdate = tag.Value
 			case "auto_now_add":
 				f.AutoNowAdd = true
 			case "auto_now":
@@ -144,18 +203,27 @@ func parseTag(tag string) []tagPair {
 	return pairs
 }
 
-// splitTag splits a tag string by commas, respecting quotes
+// splitTag splits a tag string by commas, respecting quotes and parentheses
 func splitTag(tag string) []string {
 	var parts []string
 	var current strings.Builder
 	inQuote := false
+	parenDepth := 0
 
 	for _, r := range tag {
 		switch r {
 		case '\'':
 			inQuote = !inQuote
-		case ',':
+		case '(':
 			if !inQuote {
+				parenDepth++
+			}
+		case ')':
+			if !inQuote {
+				parenDepth--
+			}
+		case ',':
+			if !inQuote && parenDepth == 0 {
 				if current.Len() > 0 {
 					parts = append(parts, strings.TrimSpace(current.String()))
 					current.Reset()
