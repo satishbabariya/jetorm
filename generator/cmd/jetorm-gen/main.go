@@ -12,70 +12,45 @@ import (
 )
 
 func main() {
-	var (
-		typeName    = flag.String("type", "", "Entity type name (required)")
-		output      = flag.String("output", "", "Output file path (required)")
-		packageName = flag.String("package", "", "Package name for generated code (default: same as input)")
-		inputFile   = flag.String("input", "", "Input Go source file (required)")
-		interfaceName = flag.String("interface", "", "Repository interface name (optional)")
-	)
-	flag.Parse()
+	// Check for init command
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		configPath := "jetorm-gen.json"
+		if len(os.Args) > 2 {
+			configPath = os.Args[2]
+		}
+		if err := initConfigFile(configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating config file: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Created configuration file: %s\n", configPath)
+		fmt.Println("Edit the file and run: jetorm-gen -config=" + configPath)
+		return
+	}
 
-	if *typeName == "" {
-		fmt.Fprintf(os.Stderr, "Error: -type is required\n")
+	// Parse configuration
+	cfg, err := parseConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		flag.Usage()
 		os.Exit(1)
 	}
-
-	if *output == "" {
-		fmt.Fprintf(os.Stderr, "Error: -output is required\n")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	if *inputFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: -input is required\n")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	// For now, we require the entity type to be passed as a string
-	// In a full implementation, we'd parse the Go file and load the package
-	// This is a simplified version that requires manual type specification
-	if *typeName == "" {
-		fmt.Fprintf(os.Stderr, "Error: -type is required\n")
-		os.Exit(1)
-	}
-
-	// Note: In a production implementation, we'd use go/types to load the actual type
-	// For now, this is a placeholder that shows the structure
-	// The actual type would be obtained by loading the package
-	fmt.Fprintf(os.Stderr, "Note: Full type loading not implemented. Using type name: %s\n", *typeName)
-	
-	// We'll generate code based on the interface methods instead
-	// The entity type will be inferred from the interface
 
 	// Get package name
-	pkgName := *packageName
+	pkgName := cfg.OutputPackage
 	if pkgName == "" {
-		pkgName = extractPackageName(*inputFile)
+		pkgName = extractPackageName(cfg.InputFile)
 	}
 
 	// Parse interface to extract methods
-	if *interfaceName == "" {
-		fmt.Fprintf(os.Stderr, "Error: -interface is required\n")
-		os.Exit(1)
-	}
-
 	parser := generator.NewParser()
-	interfaceInfo, err := parser.ParseInterface(*inputFile, *interfaceName)
+	interfaceInfo, err := parser.ParseInterface(cfg.InputFile, cfg.InterfaceName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing interface: %v\n", err)
 		os.Exit(1)
 	}
 
 	if interfaceInfo == nil {
-		fmt.Fprintf(os.Stderr, "Error: interface %s not found in %s\n", *interfaceName, *inputFile)
+		fmt.Fprintf(os.Stderr, "Error: interface %s not found in %s\n", cfg.InterfaceName, cfg.InputFile)
 		os.Exit(1)
 	}
 
@@ -84,26 +59,32 @@ func main() {
 	if len(customMethods) == 0 {
 		fmt.Fprintf(os.Stderr, "Warning: No custom query methods found in interface\n")
 	}
-
-	// For each custom method, we need to analyze it
-	// Since we don't have the actual entity type loaded, we'll generate
-	// code that can be compiled after the entity is available
-	// This is a limitation we'll address with go/types in the future
 	
 	// Generate repository code
-	code, err := generateRepositoryCode(pkgName, *typeName, customMethods)
+	code, err := generateRepositoryCode(pkgName, cfg.EntityType, customMethods, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating code: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Write to output file
-	if err := os.WriteFile(*output, []byte(code), 0644); err != nil {
+	if err := os.WriteFile(cfg.OutputFile, []byte(code), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing output file: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Successfully generated repository code: %s\n", *output)
+	fmt.Printf("Successfully generated repository code: %s\n", cfg.OutputFile)
+	
+	// Generate tests if requested
+	if cfg.GenerateTests {
+		testCode, err := generateTestCode(pkgName, cfg.EntityType, customMethods, cfg)
+		if err == nil {
+			testFile := cfg.OutputFile[:len(cfg.OutputFile)-3] + "_test.go"
+			if err := os.WriteFile(testFile, []byte(testCode), 0644); err == nil {
+				fmt.Printf("Successfully generated test file: %s\n", testFile)
+			}
+		}
+	}
 }
 
 
@@ -118,7 +99,7 @@ func extractPackageName(filePath string) string {
 }
 
 // generateRepositoryCode generates the complete repository implementation
-func generateRepositoryCode(pkgName, entityName string, customMethods []generator.MethodInfo) (string, error) {
+func generateRepositoryCode(pkgName, entityName string, customMethods []generator.MethodInfo, cfg *generator.Config) (string, error) {
 	var buf strings.Builder
 
 	// Write package declaration
@@ -135,17 +116,27 @@ func generateRepositoryCode(pkgName, entityName string, customMethods []generato
 )
 `)
 
+	// Determine ID type
+	idType := cfg.IDType
+	if idType == "" {
+		idType = "int64" // Default
+	}
+
 	// Write repository struct
 	repoName := fmt.Sprintf("%sRepository", entityName)
-	buf.WriteString(fmt.Sprintf(`
-// %s is the generated repository implementation
+	
+	// Add comments if requested
+	if cfg.GenerateComments {
+		buf.WriteString(fmt.Sprintf(`
+// %s is the generated repository implementation for %s entities.
+// This code is auto-generated by jetorm-gen. Do not edit manually.
 type %s struct {
-	*core.BaseRepository[%s, int64]
+	*core.BaseRepository[%s, %s]
 }
 
-// New%s creates a new %s repository
+// New%s creates a new %s repository instance.
 func New%s(db *core.Database) (*%s, error) {
-	baseRepo, err := core.NewBaseRepository[%s, int64](db)
+	baseRepo, err := core.NewBaseRepository[%s, %s](db)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +144,24 @@ func New%s(db *core.Database) (*%s, error) {
 		BaseRepository: baseRepo,
 	}, nil
 }
-`, repoName, repoName, entityName, repoName, repoName, repoName, repoName, entityName, repoName))
+`, repoName, entityName, repoName, entityName, idType, repoName, repoName, repoName, repoName, entityName, idType, repoName))
+	} else {
+		buf.WriteString(fmt.Sprintf(`
+type %s struct {
+	*core.BaseRepository[%s, %s]
+}
+
+func New%s(db *core.Database) (*%s, error) {
+	baseRepo, err := core.NewBaseRepository[%s, %s](db)
+	if err != nil {
+		return nil, err
+	}
+	return &%s{
+		BaseRepository: baseRepo,
+	}, nil
+}
+`, repoName, entityName, idType, repoName, repoName, entityName, idType, repoName))
+	}
 
 	// Generate custom query methods
 	// Note: This is a simplified version that generates method stubs
@@ -171,6 +179,28 @@ func New%s(db *core.Database) (*%s, error) {
 		}
 	}
 
+	return buf.String(), nil
+}
+
+// generateTestCode generates test code for the repository
+func generateTestCode(pkgName, entityName string, customMethods []generator.MethodInfo, cfg *generator.Config) (string, error) {
+	var buf strings.Builder
+	
+	buf.WriteString(fmt.Sprintf("package %s\n\n", pkgName))
+	buf.WriteString(`import (
+	"context"
+	"testing"
+)
+`)
+	
+	repoName := fmt.Sprintf("%sRepository", entityName)
+	buf.WriteString(fmt.Sprintf(`
+func Test%s(t *testing.T) {
+	// TODO: Implement tests for %s
+	t.Skip("Tests not yet implemented")
+}
+`, repoName, repoName))
+	
 	return buf.String(), nil
 }
 
