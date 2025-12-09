@@ -414,7 +414,7 @@ func (m *QueryMethod) ToSQL(tableName string, fieldToColumn func(string) string)
 			condition = fmt.Sprintf("%s NOT LIKE $%d", columnName, paramIndex)
 			paramIndex++
 		case OpIn:
-			// For IN, we need to handle slice parameter
+			// For IN, we need to handle slice parameter - use PostgreSQL ANY
 			condition = fmt.Sprintf("%s = ANY($%d)", columnName, paramIndex)
 			paramIndex++
 		case OpNotIn:
