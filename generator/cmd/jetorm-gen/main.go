@@ -12,18 +12,22 @@ import (
 )
 
 func main() {
-	// Check for init command
-	if len(os.Args) > 1 && os.Args[1] == "init" {
-		configPath := "jetorm-gen.json"
-		if len(os.Args) > 2 {
-			configPath = os.Args[2]
+	// Check for commands
+	if len(os.Args) > 1 {
+		command := os.Args[1]
+		args := os.Args[2:]
+		
+		// Handle help
+		if command == "help" || command == "-h" || command == "--help" {
+			printUsage()
+			return
 		}
-		if err := initConfigFile(configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating config file: %v\n", err)
+		
+		// Execute command
+		if err := executeCommand(command, args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Created configuration file: %s\n", configPath)
-		fmt.Println("Edit the file and run: jetorm-gen -config=" + configPath)
 		return
 	}
 

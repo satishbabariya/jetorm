@@ -12,6 +12,12 @@ import (
 )
 
 func main() {
+	// Check for help
+	if len(os.Args) > 1 && (os.Args[1] == "help" || os.Args[1] == "-h" || os.Args[1] == "--help") {
+		printMigrationUsage()
+		return
+	}
+
 	var (
 		command      = flag.String("command", "", "Migration command: up, down, down-to, status, create, validate")
 		dbURL        = flag.String("db", "", "Database connection string")
@@ -23,17 +29,40 @@ func main() {
 
 	if *command == "" {
 		fmt.Fprintf(os.Stderr, "Error: -command is required\n")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	if *dbURL == "" && *command != "create" && *command != "validate" {
-		fmt.Fprintf(os.Stderr, "Error: -db is required for command: %s\n", *command)
+		printMigrationUsage()
 		os.Exit(1)
 	}
 
 	ctx := context.Background()
 
+	// Open database if needed
+	var db *sql.DB
+	var err error
+	if *dbURL != "" {
+		db, err = sql.Open("pgx", *dbURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+	}
+
+	// Prepare args for command
+	var args []string
+	if *migrationName != "" {
+		args = append(args, *migrationName)
+	}
+	if *targetVersion > 0 {
+		args = append(args, fmt.Sprintf("%d", *targetVersion))
+	}
+
+	// Execute command
+	if err := executeMigrationCommand(*command, ctx, db, *migrationsDir, args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Legacy switch statement for backward compatibility
 	switch *command {
 	case "create":
 		if *migrationName == "" {
