@@ -496,7 +496,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🚀 Roadmap
 
-- [ ] Jet SQL builder integration
+- [x] Jet SQL builder integration
 - [ ] Additional database drivers (MySQL, SQLite)
 - [ ] Redis cache implementation
 - [ ] Query optimization
